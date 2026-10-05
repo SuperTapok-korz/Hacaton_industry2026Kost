@@ -31,7 +31,12 @@ class ProctorWindow(QMainWindow):
         self.detector = None
         self.face_mesh = None
         self.last_event: dict[str, float] = {}
-        self.gaze_history: deque[str] = deque(maxlen=30)
+        self.gaze_samples: list[tuple[float, float, float, float]] = []
+        self.gaze_baseline: tuple[float, float, float, float] | None = None
+        self.gaze_metrics_history: deque[tuple[float, float, float, float]] = deque(maxlen=7)
+        self.gaze_candidate = ""
+        self.gaze_candidate_since = 0.0
+        self.gaze_state = ""
         self.started = False
 
         self.video = QLabel("Нажмите «Начать проверку», чтобы включить камеру")
@@ -150,6 +155,11 @@ class ProctorWindow(QMainWindow):
         self.status.setText("● Проверка идёт")
         self.status.setStyleSheet("color:#16a34a;font-size:16px;font-weight:600")
         self.events.clear()
+        self.gaze_samples.clear()
+        self.gaze_baseline = None
+        self.gaze_metrics_history.clear()
+        self.gaze_candidate = ""
+        self.gaze_state = ""
         self.log_event("Сессия начата", "start", 0)
         self.timer.start(80)
 
@@ -198,23 +208,32 @@ class ProctorWindow(QMainWindow):
             faces = result.multi_face_landmarks or []
             if not faces:
                 self.log_event("Лицо не обнаружено", "no_face", 5)
-                self.gaze_history.append("нет лица")
             else:
                 if len(faces) > 1:
                     self.log_event(f"В кадре обнаружено лиц: {len(faces)}", "multiple_faces", 5)
-                for face in faces:
+                ordered_faces = sorted(
+                    faces,
+                    key=lambda face: (
+                        max(point.x for point in face.landmark) - min(point.x for point in face.landmark)
+                    ) * (
+                        max(point.y for point in face.landmark) - min(point.y for point in face.landmark)
+                    ),
+                    reverse=True,
+                )
+                primary_metrics = None
+                for face_index, face in enumerate(ordered_faces):
                     pts = face.landmark
                     xs = [p.x * width for p in pts]
                     ys = [p.y * height for p in pts]
                     x1, x2 = max(0, int(min(xs))), min(width - 1, int(max(xs)))
                     y1, y2 = max(0, int(min(ys))), min(height - 1, int(max(ys)))
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (34, 197, 94), 2)
-                    direction = self.estimate_gaze(pts)
-                    self.gaze_history.append(direction)
-                    if direction in ("вниз", "влево", "вправо"):
-                        self.log_event(f"Взгляд отведён {direction}", f"gaze_{direction}", 4)
-                    cv2.putText(frame, f"Взгляд: {direction}", (x1, max(24, y1 - 10)),
-                                cv2.FONT_HERSHEY_SIMPLEX, .65, (34, 197, 94), 2)
+                    if face_index == 0:
+                        primary_metrics = self.measure_face(pts)
+                if primary_metrics is not None:
+                    state = self.update_gaze_state(primary_metrics)
+                    cv2.putText(frame, state, (24, 34), cv2.FONT_HERSHEY_SIMPLEX,
+                                .7, (34, 197, 94), 2)
         else:
             self.log_event("Анализ лица не запущен", "face_error")
 
@@ -238,28 +257,85 @@ class ProctorWindow(QMainWindow):
         ))
 
     @staticmethod
-    def estimate_gaze(landmarks) -> str:
-        """Coarse iris position relative to eye corners; a demo signal, not an eye tracker."""
-        # Refined Face Mesh iris and eye-corner landmark indices.
-        pairs = ((33, 133, 468), (362, 263, 473))
-        ratios = []
-        for left, right, iris in pairs:
-            span = landmarks[right].x - landmarks[left].x
-            if abs(span) > 1e-5:
-                ratios.append((landmarks[iris].x - landmarks[left].x) / span)
-        if not ratios:
-            return "неизвестно"
-        ratio = sum(ratios) / len(ratios)
-        # Face is mirrored for the user's preview.
-        if ratio < 0.37:
-            return "вправо"
-        if ratio > 0.63:
-            return "влево"
-        eye_y = (landmarks[159].y + landmarks[386].y) / 2
-        iris_y = (landmarks[468].y + landmarks[473].y) / 2
-        if iris_y - eye_y > 0.012:
-            return "вниз"
-        return "на экран"
+    def measure_face(landmarks) -> tuple[float, float, float, float]:
+        """Return normalized iris and head offsets; all values are relative to eye size."""
+        eye_pairs = ((33, 133, 468, 159, 145), (362, 263, 473, 386, 374))
+        horizontal_iris = []
+        vertical_iris = []
+        for outer, inner, iris, upper, lower in eye_pairs:
+            span = landmarks[inner].x - landmarks[outer].x
+            if abs(span) < 1e-5:
+                continue
+            horizontal_iris.append((landmarks[iris].x - landmarks[outer].x) / span)
+            eye_mid_y = (landmarks[upper].y + landmarks[lower].y) / 2
+            vertical_iris.append((landmarks[iris].y - eye_mid_y) / abs(span))
+        if not horizontal_iris:
+            return (0.5, 0.0, 0.5, 0.0)
+
+        # Nose position relative to the eye line estimates head turn and tilt.
+        face_left, face_right = landmarks[33], landmarks[263]
+        eye_width = max(abs(face_right.x - face_left.x), 1e-5)
+        nose = landmarks[1]
+        head_horizontal = (nose.x - face_left.x) / (face_right.x - face_left.x or 1e-5)
+        eye_line_y = (face_left.y + face_right.y) / 2
+        head_vertical = (nose.y - eye_line_y) / eye_width
+        return (
+            float(np.mean(horizontal_iris)),
+            float(np.mean(vertical_iris)),
+            float(head_horizontal),
+            float(head_vertical),
+        )
+
+    def update_gaze_state(self, metrics: tuple[float, float, float, float]) -> str:
+        """Calibrate to the student's neutral pose, smooth noise, then use two severity bands."""
+        if self.gaze_baseline is None:
+            self.gaze_samples.append(metrics)
+            if len(self.gaze_samples) < 24:
+                return "Калибровка — смотрите на экран"
+            self.gaze_baseline = tuple(float(x) for x in np.median(self.gaze_samples, axis=0))
+            self.gaze_metrics_history.clear()
+            self.gaze_candidate = "на экран"
+            self.gaze_candidate_since = time.monotonic()
+            self.gaze_state = "на экран"
+            return "Калибровка готова — смотрите на экран"
+
+        self.gaze_metrics_history.append(metrics)
+        smoothed = np.median(np.asarray(self.gaze_metrics_history), axis=0)
+        delta = smoothed - np.asarray(self.gaze_baseline)
+        eye_x, eye_y, head_x, head_y = map(float, delta)
+
+        # Eye movement and head movement have separate thresholds. Small natural
+        # movements are shown as slight; only persistent larger deviations alert.
+        candidates = [
+            (abs(eye_x) / 0.28, "влево" if eye_x > 0 else "вправо", abs(eye_x), 0.15, 0.28),
+            (abs(eye_y) / 0.24, "вниз" if eye_y > 0 else "вверх", abs(eye_y), 0.13, 0.24),
+            (abs(head_x) / 0.20, "поворот головы влево" if head_x > 0 else "поворот головы вправо", abs(head_x), 0.10, 0.20),
+            (abs(head_y) / 0.28, "наклон головы вниз" if head_y > 0 else "наклон головы вверх", abs(head_y), 0.16, 0.28),
+        ]
+        strongest = max(candidates, key=lambda item: item[0])
+        _, direction, amount, slight_threshold, strong_threshold = strongest
+        if amount < slight_threshold:
+            proposed = "на экран"
+        else:
+            severity = "сильный" if amount >= strong_threshold else "небольшой"
+            proposed = f"{severity} отвод: {direction}"
+
+        now = time.monotonic()
+        if proposed != self.gaze_candidate:
+            self.gaze_candidate = proposed
+            self.gaze_candidate_since = now
+        dwell = 0.65 if proposed.startswith("сильный") else 0.9
+        if proposed != self.gaze_state and now - self.gaze_candidate_since >= dwell:
+            self.gaze_state = proposed
+            if proposed != "на экран":
+                key = "gaze_strong" if proposed.startswith("сильный") else "gaze_slight"
+                self.log_event(
+                    "Сильный отвод взгляда: " + direction if key == "gaze_strong"
+                    else "Небольшой отвод взгляда: " + direction,
+                    key,
+                    1.0,
+                )
+        return self.gaze_state or proposed
 
     def stop_session(self) -> None:
         self.timer.stop()
@@ -269,6 +345,11 @@ class ProctorWindow(QMainWindow):
         if self.face_mesh:
             self.face_mesh.close()
             self.face_mesh = None
+        self.gaze_samples.clear()
+        self.gaze_baseline = None
+        self.gaze_metrics_history.clear()
+        self.gaze_candidate = ""
+        self.gaze_state = ""
         self.detector = None
         self.started = False
         self.start_button.setEnabled(True)
