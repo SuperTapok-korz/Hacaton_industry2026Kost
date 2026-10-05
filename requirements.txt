@@ -1,5 +1,12 @@
+# CPU-only PyTorch wheels come from the official PyTorch package index.
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
+
 numpy<2
 opencv-python
-ultralytics
+matplotlib
 mediapipe==0.10.14
 PySide6
+torch
+torchvision
+ultralytics
