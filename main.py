@@ -307,10 +307,10 @@ class ProctorWindow(QMainWindow):
         # Eye movement and head movement have separate thresholds. Small natural
         # movements are shown as slight; only persistent larger deviations alert.
         candidates = [
-            (abs(eye_x) / 0.28, "влево" if eye_x > 0 else "вправо", abs(eye_x), 0.15, 0.28),
-            (abs(eye_y) / 0.24, "вниз" if eye_y > 0 else "вверх", abs(eye_y), 0.13, 0.24),
-            (abs(head_x) / 0.20, "поворот головы влево" if head_x > 0 else "поворот головы вправо", abs(head_x), 0.10, 0.20),
-            (abs(head_y) / 0.28, "наклон головы вниз" if head_y > 0 else "наклон головы вверх", abs(head_y), 0.16, 0.28),
+            (abs(eye_x) / 0.40, "влево" if eye_x > 0 else "вправо", abs(eye_x), 0.15, 0.40),
+            (abs(eye_y) / 0.33, "вниз" if eye_y > 0 else "вверх", abs(eye_y), 0.13, 0.33),
+            (abs(head_x) / 0.28, "поворот головы влево" if head_x > 0 else "поворот головы вправо", abs(head_x), 0.10, 0.28),
+            (abs(head_y) / 0.40, "наклон головы вниз" if head_y > 0 else "наклон головы вверх", abs(head_y), 0.16, 0.40),
         ]
         strongest = max(candidates, key=lambda item: item[0])
         _, direction, amount, slight_threshold, strong_threshold = strongest
