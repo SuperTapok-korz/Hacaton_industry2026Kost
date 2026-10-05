@@ -10,4 +10,4 @@ mediapipe==0.10.14
 PySide6
 keyboard
 numpy
-jinja2
+jinja2 ww tv
