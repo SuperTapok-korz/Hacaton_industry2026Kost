@@ -4,6 +4,8 @@
 Python 3.11   (winget install Python.Python.3.11)
 
 ## библиотеки к python 3.11
+
+нужно venv (python -m venv venv)
 opencv-python
 ultralytics
 mediapipe==0.10.14
