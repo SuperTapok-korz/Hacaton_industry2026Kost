@@ -40,7 +40,6 @@ class DemoTestDialog(QDialog):
         self.answers: list[int | None] = [None] * len(self.QUESTIONS)
         self.focus_lost_at: float | None = None
         self.setWindowTitle("Пробный тест")
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.setStyleSheet("QDialog { background:#f8fafc; } QLabel { color:#0f172a; }")
 
         layout = QVBoxLayout(self)
