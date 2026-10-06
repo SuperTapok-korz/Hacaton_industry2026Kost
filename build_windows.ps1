@@ -20,6 +20,10 @@ try {
         }
     }
 
+    Write-Host "Закрепляю совместимую версию Qt для сборки..."
+    & $python -m pip install --force-reinstall "PySide6==6.8.3"
+    if ($LASTEXITCODE -ne 0) { throw "Не удалось установить совместимую версию PySide6." }
+
     Write-Host "Устанавливаю PyInstaller в виртуальное окружение..."
     & $python -m pip install pyinstaller
     if ($LASTEXITCODE -ne 0) { throw "Не удалось установить PyInstaller." }
