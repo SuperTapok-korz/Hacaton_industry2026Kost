@@ -9,17 +9,122 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QHBoxLayout, QLabel, QListWidget, QMainWindow, QMessageBox,
-    QPushButton, QVBoxLayout, QWidget,
+    QApplication, QButtonGroup, QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget,
+    QMainWindow, QMessageBox, QPushButton, QRadioButton, QVBoxLayout, QWidget,
 )
 
 
 APP_DIR = Path(__file__).resolve().parent
 MODEL_PATH = APP_DIR / "yolov8n.pt"
 PHONE_CLASS_ID = 67  # COCO class: cell phone
+
+
+class DemoTestDialog(QDialog):
+    """Full-screen sample quiz with app-level shortcut handling."""
+    QUESTIONS = [
+        ("Что показывает термометр?", ["Температуру", "Скорость", "Давление"], 0),
+        ("Сколько будет 7 × 8?", ["54", "56", "64"], 1),
+        ("Какой газ нужен человеку для дыхания?", ["Кислород", "Водород", "Гелий"], 0),
+    ]
+
+    def __init__(self, proctor: "ProctorWindow") -> None:
+        super().__init__(proctor)
+        self.proctor = proctor
+        self.question_index = 0
+        self.answers: list[int | None] = [None] * len(self.QUESTIONS)
+        self.setWindowTitle("Пробный тест")
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setStyleSheet("QDialog { background:#f8fafc; } QLabel { color:#0f172a; }")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(90, 60, 90, 60)
+        self.header = QLabel("ДЕМО-ТЕСТ • РЕЖИМ НАБЛЮДЕНИЯ")
+        self.header.setStyleSheet("font-size:16px;color:#475569;font-weight:700")
+        self.progress = QLabel()
+        self.progress.setStyleSheet("font-size:15px;color:#64748b")
+        self.question = QLabel()
+        self.question.setWordWrap(True)
+        self.question.setStyleSheet("font-size:30px;font-weight:700")
+        self.choices = QButtonGroup(self)
+        self.choice_buttons = [QRadioButton() for _ in range(3)]
+        for i, button in enumerate(self.choice_buttons):
+            button.setStyleSheet("font-size:22px;padding:12px;color:#1e293b")
+            self.choices.addButton(button, i)
+            layout.addWidget(button)
+        self.notice = QLabel("Копирование и вставка в окне теста отключены. Выход из окна фиксируется.")
+        self.notice.setStyleSheet("font-size:14px;color:#64748b")
+        layout.insertWidget(0, self.header)
+        layout.insertWidget(1, self.progress)
+        layout.insertWidget(2, self.question)
+        layout.addStretch(1)
+        layout.addWidget(self.notice)
+        buttons = QHBoxLayout()
+        self.next_button = QPushButton("Далее")
+        self.finish_button = QPushButton("Завершить тест")
+        self.next_button.clicked.connect(self.next_question)
+        self.finish_button.clicked.connect(self.finish_test)
+        buttons.addWidget(self.next_button)
+        buttons.addWidget(self.finish_button)
+        layout.addLayout(buttons)
+        self.render_question()
+
+    def render_question(self) -> None:
+        if self.question_index >= len(self.QUESTIONS):
+            return
+        prompt, options, _ = self.QUESTIONS[self.question_index]
+        self.progress.setText(f"Вопрос {self.question_index + 1} из {len(self.QUESTIONS)}")
+        self.question.setText(prompt)
+        self.choices.setExclusive(False)
+        for i, (button, option) in enumerate(zip(self.choice_buttons, options)):
+            button.setText(option)
+            button.setChecked(self.answers[self.question_index] == i)
+        self.choices.setExclusive(True)
+        self.next_button.setText("Завершить" if self.question_index == len(self.QUESTIONS) - 1 else "Далее")
+
+    def next_question(self) -> None:
+        selected = self.choices.checkedId()
+        self.answers[self.question_index] = selected if selected >= 0 else None
+        if self.question_index == len(self.QUESTIONS) - 1:
+            self.finish_test()
+            return
+        self.question_index += 1
+        self.render_question()
+
+    def finish_test(self) -> None:
+        if QMessageBox.question(self, "Завершить тест", "Завершить пробный тест?") == QMessageBox.StandardButton.Yes:
+            self.proctor.log_event("Пробный тест завершён", "test_end", 0)
+            self.accept()
+
+    def keyPressEvent(self, event) -> None:
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        if ctrl and event.key() in (Qt.Key.Key_C, Qt.Key.Key_V, Qt.Key.Key_Insert):
+            self.proctor.log_event("Попытка копирования или вставки в тесте", "blocked_copy_paste", 2)
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Print:
+            self.proctor.log_event("Нажата клавиша снимка экрана", "print_screen", 2)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def changeEvent(self, event) -> None:
+        if event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
+            self.proctor.log_event("Тестовое окно потеряло фокус", "test_focus", 2)
+        super().changeEvent(event)
+
+    def closeEvent(self, event) -> None:
+        if self.result() == QDialog.DialogCode.Accepted:
+            event.accept()
+            return
+        answer = QMessageBox.question(self, "Выйти из теста", "Завершить тест и закрыть окно?")
+        if answer == QMessageBox.StandardButton.Yes:
+            self.proctor.log_event("Тестовое окно закрыто", "test_closed", 0)
+            event.accept()
+        else:
+            event.ignore()
 
 
 class ProctorWindow(QMainWindow):
@@ -48,6 +153,9 @@ class ProctorWindow(QMainWindow):
         self.events = QListWidget()
         self.events.addItem("Журнал событий появится здесь")
         self.start_button = QPushButton("Начать проверку")
+        self.test_button = QPushButton("Открыть пробный тест")
+        self.test_button.setEnabled(False)
+        self.test_button.clicked.connect(self.open_demo_test)
         self.stop_button = QPushButton("Завершить")
         self.camera_picker = QComboBox()
         self.camera_picker.addItem("Камера Windows по умолчанию", 0)
@@ -69,6 +177,7 @@ class ProctorWindow(QMainWindow):
         side.insertWidget(2, self.camera_picker)
         side.insertWidget(3, self.scan_button)
         side.addWidget(self.start_button)
+        side.addWidget(self.test_button)
         side.addWidget(self.stop_button)
         layout = QHBoxLayout()
         layout.addWidget(self.video, 3)
@@ -82,6 +191,20 @@ class ProctorWindow(QMainWindow):
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.process_frame)
+        QApplication.instance().installEventFilter(self)
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() == QEvent.Type.ApplicationDeactivate and self.started:
+            self.log_event("Приложение прокторинга потеряло фокус", "app_focus", 2)
+        return super().eventFilter(watched, event)
+
+    def open_demo_test(self) -> None:
+        if not self.started:
+            return
+        self.log_event("Пробный тест открыт", "test_start", 0)
+        dialog = DemoTestDialog(self)
+        dialog.showFullScreen()
+        dialog.exec()
 
     def scan_cameras(self) -> None:
         self.scan_button.setEnabled(False)
@@ -151,6 +274,7 @@ class ProctorWindow(QMainWindow):
             return
         self.started = True
         self.start_button.setEnabled(False)
+        self.test_button.setEnabled(True)
         self.stop_button.setEnabled(True)
         self.status.setText("● Проверка идёт")
         self.status.setStyleSheet("color:#16a34a;font-size:16px;font-weight:600")
@@ -353,6 +477,7 @@ class ProctorWindow(QMainWindow):
         self.detector = None
         self.started = False
         self.start_button.setEnabled(True)
+        self.test_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.status.setText("● Проверка завершена")
         self.status.setStyleSheet("color:#64748b;font-size:16px;font-weight:600")
