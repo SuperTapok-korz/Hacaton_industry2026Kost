@@ -12,10 +12,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import QEvent, QUrl, Qt, QTimer
+from PySide6.QtGui import QDesktopServices, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget,
+    QApplication, QButtonGroup, QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QFileDialog, QMainWindow, QMessageBox, QPushButton, QRadioButton, QVBoxLayout, QWidget,
 )
 
@@ -158,6 +158,7 @@ class ProctorWindow(QMainWindow):
         self.status.setStyleSheet("color:#64748b;font-size:16px;font-weight:600")
         self.events = QListWidget()
         self.events.addItem("Журнал событий появится здесь")
+        self.events.itemDoubleClicked.connect(self.open_event_evidence)
         self.start_button = QPushButton("Начать проверку")
         self.test_button = QPushButton("Открыть пробный тест")
         self.test_button.setEnabled(False)
@@ -271,10 +272,22 @@ class ProctorWindow(QMainWindow):
                 message += f" (снимок: {evidence})"
             except OSError:
                 message += " (не удалось сохранить снимок)"
-        self.events.insertItem(0, f"{timestamp:%H:%M:%S}  {message}")
+        item = QListWidgetItem(f"{timestamp:%H:%M:%S}  {message}")
+        item.setData(Qt.ItemDataRole.UserRole, evidence)
+        self.events.insertItem(0, item)
         self.event_records.append((timestamp.isoformat(timespec="seconds"), message, evidence))
         self.save_report_button.setEnabled(True)
         self.export_package_button.setEnabled(True)
+
+    def open_event_evidence(self, item: QListWidgetItem) -> None:
+        evidence = item.data(Qt.ItemDataRole.UserRole)
+        if not evidence:
+            return
+        image_path = APP_DIR / Path(evidence)
+        if not image_path.is_file():
+            QMessageBox.warning(self, "Снимок не найден", f"Не найден файл:\n{image_path}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(image_path)))
 
     def write_report(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
