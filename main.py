@@ -137,7 +137,7 @@ class ProctorWindow(QMainWindow):
         self.detector = None
         self.face_mesh = None
         self.last_event: dict[str, float] = {}
-        self.event_records: list[tuple[str, str]] = []
+        self.event_records: list[tuple[str, str, str]] = []
         self.session_started_at: datetime | None = None
         self.gaze_samples: list[tuple[float, float, float, float]] = []
         self.gaze_baseline: tuple[float, float, float, float] | None = None
@@ -241,21 +241,39 @@ class ProctorWindow(QMainWindow):
         self.scan_button.setEnabled(True)
         self.scan_button.setText("Найти камеры")
 
-    def log_event(self, message: str, key: str, cooldown: float = 3.0) -> None:
+    def log_event(
+        self,
+        message: str,
+        key: str,
+        cooldown: float = 3.0,
+        evidence_frame: np.ndarray | None = None,
+    ) -> None:
         now = time.monotonic()
         if now - self.last_event.get(key, 0) < cooldown:
             return
         self.last_event[key] = now
         timestamp = datetime.now()
+        evidence = ""
+        if evidence_frame is not None:
+            evidence_dir = APP_DIR / "reports" / "screenshots"
+            evidence_path = evidence_dir / f"phone_{timestamp:%Y%m%d_%H%M%S_%f}.jpg"
+            try:
+                evidence_dir.mkdir(parents=True, exist_ok=True)
+                if not cv2.imwrite(str(evidence_path), evidence_frame):
+                    raise OSError("OpenCV не смог записать изображение")
+                evidence = evidence_path.relative_to(APP_DIR).as_posix()
+                message += f" (снимок: {evidence})"
+            except OSError:
+                message += " (не удалось сохранить снимок)"
         self.events.insertItem(0, f"{timestamp:%H:%M:%S}  {message}")
-        self.event_records.append((timestamp.isoformat(timespec="seconds"), message))
+        self.event_records.append((timestamp.isoformat(timespec="seconds"), message, evidence))
         self.save_report_button.setEnabled(True)
 
     def write_report(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", newline="", encoding="utf-8-sig") as report:
             writer = csv.writer(report)
-            writer.writerow(("Время", "Событие"))
+            writer.writerow(("Время", "Событие", "Файл подтверждения"))
             writer.writerows(self.event_records)
 
     def save_report_copy(self) -> None:
@@ -417,8 +435,8 @@ class ProctorWindow(QMainWindow):
                 if phone_boxes:
                     best_phone = max(phone_boxes, key=lambda item: float(item.conf[0]))
                     x1, y1, x2, y2 = map(float, best_phone.xyxy[0].tolist())
-                    self.update_phone_tracking((x1 + x2) / 2 / width, (y1 + y2) / 2 / height)
-                    self.log_event("Обнаружен возможный смартфон", "phone", 4)
+                    self.update_phone_tracking((x1 + x2) / 2 / width, (y1 + y2) / 2 / height, frame)
+                    self.log_event("Обнаружен возможный смартфон", "phone", 4, evidence_frame=frame)
                 elif self.phone_track and time.monotonic() - self.phone_track[-1][0] > 2.5:
                     self.phone_track.clear()
             except Exception as exc:
@@ -429,7 +447,7 @@ class ProctorWindow(QMainWindow):
             self.video.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
         ))
 
-    def update_phone_tracking(self, cx: float, cy: float) -> None:
+    def update_phone_tracking(self, cx: float, cy: float, frame: np.ndarray) -> None:
         """Heuristically flag a phone that rises into the upper part of the frame."""
         now = time.monotonic()
         if self.phone_track and now - self.phone_track[-1][0] > 2.5:
@@ -447,6 +465,7 @@ class ProctorWindow(QMainWindow):
                 "Телефон перемещён вверх — возможна попытка съёмки",
                 "phone_raised",
                 8.0,
+                evidence_frame=frame,
             )
 
     @staticmethod
