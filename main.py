@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import csv
+import io
 import sys
 import time
+import zipfile
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -164,6 +166,9 @@ class ProctorWindow(QMainWindow):
         self.save_report_button = QPushButton("Сохранить копию отчёта…")
         self.save_report_button.setEnabled(False)
         self.save_report_button.clicked.connect(self.save_report_copy)
+        self.export_package_button = QPushButton("Экспорт отчёта и снимков…")
+        self.export_package_button.setEnabled(False)
+        self.export_package_button.clicked.connect(self.export_evidence_package)
         self.camera_picker = QComboBox()
         self.camera_picker.addItem("Камера Windows по умолчанию", 0)
         self.scan_button = QPushButton("Найти камеры")
@@ -187,6 +192,7 @@ class ProctorWindow(QMainWindow):
         side.addWidget(self.test_button)
         side.addWidget(self.stop_button)
         side.addWidget(self.save_report_button)
+        side.addWidget(self.export_package_button)
         layout = QHBoxLayout()
         layout.addWidget(self.video, 3)
         panel = QWidget()
@@ -268,6 +274,7 @@ class ProctorWindow(QMainWindow):
         self.events.insertItem(0, f"{timestamp:%H:%M:%S}  {message}")
         self.event_records.append((timestamp.isoformat(timespec="seconds"), message, evidence))
         self.save_report_button.setEnabled(True)
+        self.export_package_button.setEnabled(True)
 
     def write_report(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -294,6 +301,46 @@ class ProctorWindow(QMainWindow):
             QMessageBox.information(self, "Отчёт сохранён", f"Файл сохранён:\n{destination}")
         except OSError as exc:
             QMessageBox.warning(self, "Не удалось сохранить отчёт", str(exc))
+
+    def export_evidence_package(self) -> None:
+        if not self.event_records:
+            return
+        stamp = self.session_started_at or datetime.now()
+        default_path = APP_DIR / "reports" / f"Материалы_проверки_{stamp:%Y%m%d_%H%M%S}.zip"
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт отчёта и снимков", str(default_path), "Архив ZIP (*.zip)"
+        )
+        if not filename:
+            return
+        destination = Path(filename)
+        if not destination.suffix:
+            destination = destination.with_suffix(".zip")
+
+        report_text = io.StringIO(newline="")
+        writer = csv.writer(report_text)
+        writer.writerow(("Время", "Событие", "Файл подтверждения"))
+        for timestamp, message, evidence in self.event_records:
+            archive_evidence = f"screenshots/{Path(evidence).name}" if evidence else ""
+            writer.writerow((timestamp, message, archive_evidence))
+        added_images = 0
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("report.csv", report_text.getvalue().encode("utf-8-sig"))
+                for _, _, evidence in self.event_records:
+                    if not evidence:
+                        continue
+                    image_path = APP_DIR / Path(evidence)
+                    if image_path.is_file():
+                        archive.write(image_path, f"screenshots/{image_path.name}")
+                        added_images += 1
+            QMessageBox.information(
+                self,
+                "Материалы экспортированы",
+                f"Создан архив:\n{destination}\nСнимков добавлено: {added_images}",
+            )
+        except OSError as exc:
+            QMessageBox.warning(self, "Не удалось создать архив", str(exc))
 
     def start_session(self) -> None:
         # Load optional detectors only when the session starts, so startup remains quick.
@@ -331,6 +378,7 @@ class ProctorWindow(QMainWindow):
         self.session_started_at = datetime.now()
         self.event_records.clear()
         self.save_report_button.setEnabled(False)
+        self.export_package_button.setEnabled(False)
         self.start_button.setEnabled(False)
         self.test_button.setEnabled(True)
         self.stop_button.setEnabled(True)
