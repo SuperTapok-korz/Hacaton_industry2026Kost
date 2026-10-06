@@ -1,6 +1,7 @@
 """Local proctoring demo for Qostanai Industry Hackathon 2026."""
 from __future__ import annotations
 
+import csv
 import sys
 import time
 from collections import deque
@@ -13,7 +14,7 @@ from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget,
-    QMainWindow, QMessageBox, QPushButton, QRadioButton, QVBoxLayout, QWidget,
+    QFileDialog, QMainWindow, QMessageBox, QPushButton, QRadioButton, QVBoxLayout, QWidget,
 )
 
 
@@ -136,6 +137,8 @@ class ProctorWindow(QMainWindow):
         self.detector = None
         self.face_mesh = None
         self.last_event: dict[str, float] = {}
+        self.event_records: list[tuple[str, str]] = []
+        self.session_started_at: datetime | None = None
         self.gaze_samples: list[tuple[float, float, float, float]] = []
         self.gaze_baseline: tuple[float, float, float, float] | None = None
         self.gaze_metrics_history: deque[tuple[float, float, float, float]] = deque(maxlen=7)
@@ -158,6 +161,9 @@ class ProctorWindow(QMainWindow):
         self.test_button.setEnabled(False)
         self.test_button.clicked.connect(self.open_demo_test)
         self.stop_button = QPushButton("Завершить")
+        self.save_report_button = QPushButton("Сохранить копию отчёта…")
+        self.save_report_button.setEnabled(False)
+        self.save_report_button.clicked.connect(self.save_report_copy)
         self.camera_picker = QComboBox()
         self.camera_picker.addItem("Камера Windows по умолчанию", 0)
         self.scan_button = QPushButton("Найти камеры")
@@ -165,7 +171,7 @@ class ProctorWindow(QMainWindow):
         self.stop_button.setEnabled(False)
         self.start_button.clicked.connect(self.start_session)
         self.stop_button.clicked.connect(self.stop_session)
-        self.hint = QLabel("Видео обрабатывается на этом компьютере. Запись не сохраняется.")
+        self.hint = QLabel("Видео не сохраняется. Отчёт событий появится в папке reports после проверки.")
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet("color:#64748b")
 
@@ -180,6 +186,7 @@ class ProctorWindow(QMainWindow):
         side.addWidget(self.start_button)
         side.addWidget(self.test_button)
         side.addWidget(self.stop_button)
+        side.addWidget(self.save_report_button)
         layout = QHBoxLayout()
         layout.addWidget(self.video, 3)
         panel = QWidget()
@@ -239,7 +246,36 @@ class ProctorWindow(QMainWindow):
         if now - self.last_event.get(key, 0) < cooldown:
             return
         self.last_event[key] = now
-        self.events.insertItem(0, f"{datetime.now():%H:%M:%S}  {message}")
+        timestamp = datetime.now()
+        self.events.insertItem(0, f"{timestamp:%H:%M:%S}  {message}")
+        self.event_records.append((timestamp.isoformat(timespec="seconds"), message))
+        self.save_report_button.setEnabled(True)
+
+    def write_report(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8-sig") as report:
+            writer = csv.writer(report)
+            writer.writerow(("Время", "Событие"))
+            writer.writerows(self.event_records)
+
+    def save_report_copy(self) -> None:
+        if not self.event_records:
+            return
+        stamp = self.session_started_at or datetime.now()
+        default_path = APP_DIR / f"Отчёт_прокторинга_{stamp:%Y%m%d_%H%M%S}.csv"
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить отчёт событий", str(default_path), "Таблица CSV (*.csv)"
+        )
+        if not filename:
+            return
+        destination = Path(filename)
+        if not destination.suffix:
+            destination = destination.with_suffix(".csv")
+        try:
+            self.write_report(destination)
+            QMessageBox.information(self, "Отчёт сохранён", f"Файл сохранён:\n{destination}")
+        except OSError as exc:
+            QMessageBox.warning(self, "Не удалось сохранить отчёт", str(exc))
 
     def start_session(self) -> None:
         # Load optional detectors only when the session starts, so startup remains quick.
@@ -274,6 +310,9 @@ class ProctorWindow(QMainWindow):
             QMessageBox.critical(self, "Камера недоступна", "Не удалось открыть выбранную камеру. Выберите другой источник видео и проверьте, что DroidCam запущен на компьютере.")
             return
         self.started = True
+        self.session_started_at = datetime.now()
+        self.event_records.clear()
+        self.save_report_button.setEnabled(False)
         self.start_button.setEnabled(False)
         self.test_button.setEnabled(True)
         self.stop_button.setEnabled(True)
@@ -492,6 +531,7 @@ class ProctorWindow(QMainWindow):
         return self.gaze_state or proposed
 
     def stop_session(self) -> None:
+        was_started = self.started
         self.timer.stop()
         if self.capture:
             self.capture.release()
@@ -514,7 +554,15 @@ class ProctorWindow(QMainWindow):
         self.status.setStyleSheet("color:#64748b;font-size:16px;font-weight:600")
         self.video.setPixmap(QPixmap())
         self.video.setText("Проверка завершена")
-        self.log_event("Сессия завершена", "stop", 0)
+        if was_started:
+            self.log_event("Сессия завершена", "stop", 0)
+            report_time = self.session_started_at or datetime.now()
+            report_path = APP_DIR / "reports" / f"Проверка_{report_time:%Y%m%d_%H%M%S}.csv"
+            try:
+                self.write_report(report_path)
+                self.status.setText("● Проверка завершена; отчёт сохранён в reports")
+            except OSError as exc:
+                QMessageBox.warning(self, "Не удалось сохранить отчёт", str(exc))
 
     def closeEvent(self, event) -> None:
         self.stop_session()
