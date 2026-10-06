@@ -147,6 +147,7 @@ class ProctorWindow(QMainWindow):
         self.gaze_candidate = ""
         self.gaze_candidate_since = 0.0
         self.gaze_state = ""
+        self.multiple_faces_since: float | None = None
         self.phone_track: deque[tuple[float, float, float]] = deque(maxlen=40)
         self.started = False
 
@@ -448,12 +449,26 @@ class ProctorWindow(QMainWindow):
 
         if self.face_mesh:
             result = self.face_mesh.process(rgb)
-            faces = result.multi_face_landmarks or []
+            faces = [
+                face for face in (result.multi_face_landmarks or [])
+                if self.is_plausible_face(face.landmark)
+            ]
             if not faces:
+                self.multiple_faces_since = None
                 self.log_event("Лицо не обнаружено", "no_face", 5)
             else:
                 if len(faces) > 1:
-                    self.log_event(f"В кадре обнаружено лиц: {len(faces)}", "multiple_faces", 5)
+                    now = time.monotonic()
+                    if self.multiple_faces_since is None:
+                        self.multiple_faces_since = now
+                    elif now - self.multiple_faces_since >= 1.2:
+                        self.log_event(
+                            f"В кадре устойчиво обнаружено лиц: {len(faces)}",
+                            "multiple_faces",
+                            10,
+                        )
+                else:
+                    self.multiple_faces_since = None
                 ordered_faces = sorted(
                     faces,
                     key=lambda face: (
@@ -528,6 +543,35 @@ class ProctorWindow(QMainWindow):
                 8.0,
                 evidence_frame=frame,
             )
+
+    @staticmethod
+    def is_plausible_face(landmarks) -> bool:
+        """Reject grossly implausible Face Mesh shapes before counting a face."""
+        xs = np.asarray([point.x for point in landmarks], dtype=float)
+        ys = np.asarray([point.y for point in landmarks], dtype=float)
+        face_width = float(xs.max() - xs.min())
+        face_height = float(ys.max() - ys.min())
+        if face_width < 1e-4 or face_height < 1e-4:
+            return False
+        aspect = face_width / face_height
+        if not 0.45 <= aspect <= 1.35:
+            return False
+
+        eye_left, eye_right = landmarks[33], landmarks[263]
+        nose, mouth_left, mouth_right = landmarks[1], landmarks[61], landmarks[291]
+        eye_span = abs(eye_right.x - eye_left.x)
+        if eye_span / face_width < 0.25:
+            return False
+        eye_min_x = min(eye_left.x, eye_right.x)
+        nose_position = (nose.x - eye_min_x) / max(eye_span, 1e-5)
+        if not 0.12 <= nose_position <= 0.88:
+            return False
+
+        eye_line = (eye_left.y + eye_right.y) / 2
+        mouth_line = (mouth_left.y + mouth_right.y) / 2
+        nose_drop = (nose.y - eye_line) / face_height
+        mouth_drop = (mouth_line - eye_line) / face_height
+        return 0.02 <= nose_drop <= 0.55 and nose_drop < mouth_drop <= 0.9
 
     @staticmethod
     def measure_face(landmarks) -> tuple[float, float, float, float]:
