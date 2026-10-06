@@ -142,7 +142,7 @@ class ProctorWindow(QMainWindow):
         self.gaze_candidate = ""
         self.gaze_candidate_since = 0.0
         self.gaze_state = ""
-        self.phone_track: deque[tuple[float, float, float, float, float]] = deque(maxlen=40)
+        self.phone_track: deque[tuple[float, float, float]] = deque(maxlen=40)
         self.started = False
 
         self.video = QLabel("Нажмите «Начать проверку», чтобы включить камеру")
@@ -364,7 +364,10 @@ class ProctorWindow(QMainWindow):
 
         if self.detector:
             try:
-                prediction = self.detector.predict(frame, imgsz=640, conf=0.35, verbose=False)[0]
+                # Lower confidence helps retain partially hand-occluded phones.
+                prediction = self.detector.predict(
+                    frame, imgsz=640, conf=0.20, classes=[PHONE_CLASS_ID], verbose=False
+                )[0]
                 phone_boxes = [box for box in prediction.boxes if int(box.cls[0]) == PHONE_CLASS_ID]
                 for box in phone_boxes:
                     x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
@@ -375,8 +378,7 @@ class ProctorWindow(QMainWindow):
                 if phone_boxes:
                     best_phone = max(phone_boxes, key=lambda item: float(item.conf[0]))
                     x1, y1, x2, y2 = map(float, best_phone.xyxy[0].tolist())
-                    self.update_phone_tracking((x1 + x2) / 2 / width, (y1 + y2) / 2 / height,
-                                               (x2 - x1) / width, (y2 - y1) / height)
+                    self.update_phone_tracking((x1 + x2) / 2 / width, (y1 + y2) / 2 / height)
                     self.log_event("Обнаружен возможный смартфон", "phone", 4)
                 elif self.phone_track and time.monotonic() - self.phone_track[-1][0] > 2.5:
                     self.phone_track.clear()
@@ -388,23 +390,22 @@ class ProctorWindow(QMainWindow):
             self.video.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
         ))
 
-    def update_phone_tracking(self, cx: float, cy: float, box_width: float, box_height: float) -> None:
+    def update_phone_tracking(self, cx: float, cy: float) -> None:
         """Heuristically flag a phone that rises into the upper part of the frame."""
         now = time.monotonic()
-        if self.phone_track and now - self.phone_track[-1][0] > 1.5:
+        if self.phone_track and now - self.phone_track[-1][0] > 2.5:
             self.phone_track.clear()
-        self.phone_track.append((now, cx, cy, box_width, box_height))
+        self.phone_track.append((now, cx, cy))
 
         # Compare with a detection at least 0.7s old to ignore single-frame jitter.
         reference = next((item for item in self.phone_track if now - item[0] >= 0.7), None)
         if reference is None:
             return
         rise = reference[2] - cy
-        upright = box_height / max(box_width, 1e-5) >= 1.15
-        raised_to_screen = cy < 0.62
-        if rise >= 0.13 and upright and raised_to_screen:
+        raised_into_view = cy < 0.68
+        if rise >= 0.10 and raised_into_view:
             self.log_event(
-                "Телефон поднят к экрану — возможна попытка съёмки",
+                "Телефон перемещён вверх — возможна попытка съёмки",
                 "phone_raised",
                 8.0,
             )
