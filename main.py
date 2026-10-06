@@ -12,10 +12,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEvent, QUrl, Qt, QTimer
-from PySide6.QtGui import QDesktopServices, QImage, QPixmap
+from PySide6.QtCore import QEvent, QSize, QUrl, Qt, QTimer
+from PySide6.QtGui import QDesktopServices, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QApplication, QButtonGroup, QComboBox, QDialog, QHBoxLayout, QLabel, QListView, QListWidget, QListWidgetItem,
     QFileDialog, QMainWindow, QMessageBox, QPushButton, QRadioButton, QVBoxLayout, QWidget,
 )
 
@@ -171,6 +171,9 @@ class ProctorWindow(QMainWindow):
         self.export_package_button = QPushButton("Экспорт отчёта и снимков…")
         self.export_package_button.setEnabled(False)
         self.export_package_button.clicked.connect(self.export_evidence_package)
+        self.session_images_button = QPushButton("Снимки сессии…")
+        self.session_images_button.setEnabled(False)
+        self.session_images_button.clicked.connect(self.show_session_images)
         self.camera_picker = QComboBox()
         self.camera_picker.addItem("Камера Windows по умолчанию", 0)
         self.scan_button = QPushButton("Найти камеры")
@@ -195,6 +198,7 @@ class ProctorWindow(QMainWindow):
         side.addWidget(self.stop_button)
         side.addWidget(self.save_report_button)
         side.addWidget(self.export_package_button)
+        side.addWidget(self.session_images_button)
         layout = QHBoxLayout()
         layout.addWidget(self.video, 3)
         panel = QWidget()
@@ -279,6 +283,45 @@ class ProctorWindow(QMainWindow):
         self.event_records.append((timestamp.isoformat(timespec="seconds"), message, evidence))
         self.save_report_button.setEnabled(True)
         self.export_package_button.setEnabled(True)
+        if evidence:
+            self.session_images_button.setEnabled(True)
+
+    def show_session_images(self) -> None:
+        images = [
+            (timestamp, message, evidence)
+            for timestamp, message, evidence in self.event_records
+            if evidence and (APP_DIR / Path(evidence)).is_file()
+        ]
+        if not images:
+            QMessageBox.information(self, "Снимки сессии", "В этой проверке снимков пока нет.")
+            self.session_images_button.setEnabled(False)
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Снимки сессии")
+        dialog.resize(760, 560)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Двойной щелчок по снимку откроет его в полном размере."))
+        gallery = QListWidget()
+        gallery.setViewMode(QListView.ViewMode.IconMode)
+        gallery.setResizeMode(QListView.ResizeMode.Adjust)
+        gallery.setIconSize(QSize(180, 130))
+        gallery.setGridSize(QSize(210, 175))
+        gallery.setWordWrap(True)
+        for timestamp, message, evidence in images:
+            image_path = APP_DIR / Path(evidence)
+            item = QListWidgetItem(
+                QIcon(QPixmap(str(image_path)).scaled(
+                    180, 130, Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )),
+                f"{timestamp[11:19]}\n{message.split(' (снимок:')[0]}",
+            )
+            item.setData(Qt.ItemDataRole.UserRole, evidence)
+            gallery.addItem(item)
+        gallery.itemDoubleClicked.connect(self.open_event_evidence)
+        layout.addWidget(gallery)
+        dialog.exec()
 
     def open_event_evidence(self, item: QListWidgetItem) -> None:
         evidence = item.data(Qt.ItemDataRole.UserRole)
@@ -393,6 +436,7 @@ class ProctorWindow(QMainWindow):
         self.event_records.clear()
         self.save_report_button.setEnabled(False)
         self.export_package_button.setEnabled(False)
+        self.session_images_button.setEnabled(False)
         self.start_button.setEnabled(False)
         self.test_button.setEnabled(True)
         self.stop_button.setEnabled(True)
