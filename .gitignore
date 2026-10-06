@@ -1,3 +1,7 @@
 venv/
 *.pt
 reports/
+build/
+dist/
+__pycache__/
+QostanaiProctor.spec

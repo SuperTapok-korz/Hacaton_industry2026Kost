@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import sys
 import time
 import zipfile
@@ -20,7 +21,12 @@ from PySide6.QtWidgets import (
 )
 
 
-APP_DIR = Path(__file__).resolve().parent
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+DATA_DIR = (
+    Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "QostanaiProctor"
+    if getattr(sys, "frozen", False)
+    else APP_DIR
+)
 MODEL_PATH = APP_DIR / "yolov8n.pt"
 PHONE_CLASS_ID = 67  # COCO class: cell phone
 
@@ -287,7 +293,7 @@ class ProctorWindow(QMainWindow):
         timestamp = datetime.now()
         evidence = ""
         if evidence_frame is not None:
-            evidence_dir = APP_DIR / "reports" / "screenshots"
+            evidence_dir = DATA_DIR / "reports" / "screenshots"
             evidence_path = evidence_dir / f"phone_{timestamp:%Y%m%d_%H%M%S_%f}.jpg"
             try:
                 evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -295,7 +301,7 @@ class ProctorWindow(QMainWindow):
                 self.draw_watermark(evidence_frame)
                 if not cv2.imwrite(str(evidence_path), evidence_frame):
                     raise OSError("OpenCV не смог записать изображение")
-                evidence = evidence_path.relative_to(APP_DIR).as_posix()
+                evidence = evidence_path.relative_to(DATA_DIR).as_posix()
                 message += f" (снимок: {evidence})"
             except OSError:
                 message += " (не удалось сохранить снимок)"
@@ -312,7 +318,7 @@ class ProctorWindow(QMainWindow):
         images = [
             (timestamp, message, evidence)
             for timestamp, message, evidence in self.event_records
-            if evidence and (APP_DIR / Path(evidence)).is_file()
+            if evidence and (DATA_DIR / Path(evidence)).is_file()
         ]
         if not images:
             QMessageBox.information(self, "Снимки сессии", "В этой проверке снимков пока нет.")
@@ -331,7 +337,7 @@ class ProctorWindow(QMainWindow):
         gallery.setGridSize(QSize(210, 175))
         gallery.setWordWrap(True)
         for timestamp, message, evidence in images:
-            image_path = APP_DIR / Path(evidence)
+            image_path = DATA_DIR / Path(evidence)
             item = QListWidgetItem(
                 QIcon(QPixmap(str(image_path)).scaled(
                     180, 130, Qt.AspectRatioMode.KeepAspectRatio,
@@ -349,7 +355,7 @@ class ProctorWindow(QMainWindow):
         evidence = item.data(Qt.ItemDataRole.UserRole)
         if not evidence:
             return
-        image_path = APP_DIR / Path(evidence)
+        image_path = DATA_DIR / Path(evidence)
         if not image_path.is_file():
             QMessageBox.warning(self, "Снимок не найден", f"Не найден файл:\n{image_path}")
             return
@@ -366,7 +372,7 @@ class ProctorWindow(QMainWindow):
         if not self.event_records:
             return
         stamp = self.session_started_at or datetime.now()
-        default_path = APP_DIR / f"Отчёт_прокторинга_{stamp:%Y%m%d_%H%M%S}.csv"
+        default_path = DATA_DIR / f"Отчёт_прокторинга_{stamp:%Y%m%d_%H%M%S}.csv"
         filename, _ = QFileDialog.getSaveFileName(
             self, "Сохранить отчёт событий", str(default_path), "Таблица CSV (*.csv)"
         )
@@ -385,7 +391,7 @@ class ProctorWindow(QMainWindow):
         if not self.event_records:
             return
         stamp = self.session_started_at or datetime.now()
-        default_path = APP_DIR / "reports" / f"Материалы_проверки_{stamp:%Y%m%d_%H%M%S}.zip"
+        default_path = DATA_DIR / "reports" / f"Материалы_проверки_{stamp:%Y%m%d_%H%M%S}.zip"
         filename, _ = QFileDialog.getSaveFileName(
             self, "Экспорт отчёта и снимков", str(default_path), "Архив ZIP (*.zip)"
         )
@@ -409,7 +415,7 @@ class ProctorWindow(QMainWindow):
                 for _, _, evidence in self.event_records:
                     if not evidence:
                         continue
-                    image_path = APP_DIR / Path(evidence)
+                    image_path = DATA_DIR / Path(evidence)
                     if image_path.is_file():
                         archive.write(image_path, f"screenshots/{image_path.name}")
                         added_images += 1
@@ -422,6 +428,11 @@ class ProctorWindow(QMainWindow):
             QMessageBox.warning(self, "Не удалось создать архив", str(exc))
 
     def start_session(self) -> None:
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.critical(self, "Папка данных недоступна", str(exc))
+            return
         # Load optional detectors only when the session starts, so startup remains quick.
         try:
             import mediapipe as mp
@@ -760,7 +771,7 @@ class ProctorWindow(QMainWindow):
         if was_started:
             self.log_event("Сессия завершена", "stop", 0)
             report_time = self.session_started_at or datetime.now()
-            report_path = APP_DIR / "reports" / f"Проверка_{report_time:%Y%m%d_%H%M%S}.csv"
+            report_path = DATA_DIR / "reports" / f"Проверка_{report_time:%Y%m%d_%H%M%S}.csv"
             try:
                 self.write_report(report_path)
                 self.status.setText("● Проверка завершена; отчёт сохранён в reports")
@@ -775,7 +786,10 @@ class ProctorWindow(QMainWindow):
 def main() -> int:
     app = QApplication(sys.argv)
     window = ProctorWindow()
-    window.show()
+    if "--kiosk" in sys.argv[1:]:
+        window.showFullScreen()
+    else:
+        window.show()
     return app.exec()
 
 
