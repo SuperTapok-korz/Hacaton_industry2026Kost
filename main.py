@@ -38,6 +38,7 @@ class DemoTestDialog(QDialog):
         self.proctor = proctor
         self.question_index = 0
         self.answers: list[int | None] = [None] * len(self.QUESTIONS)
+        self.focus_lost_at: float | None = None
         self.setWindowTitle("Пробный тест")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.setStyleSheet("QDialog { background:#f8fafc; } QLabel { color:#0f172a; }")
@@ -57,7 +58,10 @@ class DemoTestDialog(QDialog):
             button.setStyleSheet("font-size:22px;padding:12px;color:#1e293b")
             self.choices.addButton(button, i)
             layout.addWidget(button)
-        self.notice = QLabel("Копирование и вставка в окне теста отключены. Выход из окна фиксируется.")
+        self.notice = QLabel(
+            "Демо-киоск: Ctrl+C/V и Esc отключены внутри теста; уход в другое окно записывается. "
+            "Системные Alt+Tab и Windows остаются доступны."
+        )
         self.notice.setStyleSheet("font-size:14px;color:#64748b")
         layout.insertWidget(0, self.header)
         layout.insertWidget(1, self.progress)
@@ -107,6 +111,10 @@ class DemoTestDialog(QDialog):
             self.proctor.log_event("Попытка копирования или вставки в тесте", "blocked_copy_paste", 2)
             event.accept()
             return
+        if event.key() == Qt.Key.Key_Escape:
+            self.proctor.log_event("Попытка закрыть полноэкранный тест клавишей Esc", "escape_test", 2)
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Print:
             self.proctor.log_event("Нажата клавиша снимка экрана", "print_screen", 2)
             event.accept()
@@ -114,8 +122,21 @@ class DemoTestDialog(QDialog):
         super().keyPressEvent(event)
 
     def changeEvent(self, event) -> None:
-        if event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
-            self.proctor.log_event("Тестовое окно потеряло фокус", "test_focus", 2)
+        if event.type() == QEvent.Type.ActivationChange:
+            if not self.isActiveWindow():
+                if self.focus_lost_at is None:
+                    self.focus_lost_at = time.monotonic()
+                    self.notice.setText("Окно теста потеряло фокус — событие записано в журнал.")
+                    self.proctor.log_event("Тестовое окно потеряло фокус", "test_focus", 0)
+            elif self.focus_lost_at is not None:
+                duration = time.monotonic() - self.focus_lost_at
+                self.focus_lost_at = None
+                self.notice.setText("Фокус возвращён. Продолжайте тест.")
+                self.proctor.log_event(
+                    f"Возврат в тест после потери фокуса ({duration:.1f} с)",
+                    "test_focus_return",
+                    0,
+                )
         super().changeEvent(event)
 
     def closeEvent(self, event) -> None:
