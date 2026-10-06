@@ -271,6 +271,8 @@ class ProctorWindow(QMainWindow):
             evidence_path = evidence_dir / f"phone_{timestamp:%Y%m%d_%H%M%S_%f}.jpg"
             try:
                 evidence_dir.mkdir(parents=True, exist_ok=True)
+                evidence_frame = evidence_frame.copy()
+                self.draw_watermark(evidence_frame)
                 if not cv2.imwrite(str(evidence_path), evidence_frame):
                     raise OSError("OpenCV не смог записать изображение")
                 evidence = evidence_path.relative_to(APP_DIR).as_posix()
@@ -562,10 +564,23 @@ class ProctorWindow(QMainWindow):
             except Exception as exc:
                 self.log_event(f"Ошибка детектора: {exc}", "detector_error", 10)
 
+        self.draw_watermark(frame)
         image = QImage(frame.data, width, height, frame.strides[0], QImage.Format.Format_BGR888)
         self.video.setPixmap(QPixmap.fromImage(image.copy()).scaled(
             self.video.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
         ))
+
+    @staticmethod
+    def draw_watermark(frame: np.ndarray) -> None:
+        label = "by.horizon"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = max(0.45, min(frame.shape[1] / 1400, 0.8))
+        thickness = 1
+        (text_width, text_height), baseline = cv2.getTextSize(label, font, scale, thickness)
+        x = max(8, frame.shape[1] - text_width - 18)
+        y = max(text_height + 8, frame.shape[0] - 16)
+        cv2.putText(frame, label, (x, y), font, scale, (15, 23, 42), thickness + 3, cv2.LINE_AA)
+        cv2.putText(frame, label, (x, y), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
     def update_phone_tracking(self, cx: float, cy: float, frame: np.ndarray) -> None:
         """Heuristically flag a phone that rises into the upper part of the frame."""
