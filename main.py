@@ -1,4 +1,4 @@
-"""Local proctoring demo for Qostanai Industry Hackathon 2026."""
+"""Локальный прототип прокторинга для хакатона Qostanai."""
 from __future__ import annotations
 
 import csv
@@ -37,7 +37,7 @@ class ShortcutSignals(QObject):
 
 
 class DemoTestDialog(QDialog):
-    """Full-screen sample quiz with temporary system-wide shortcut blocking."""
+    """Полноэкранный тест с временной блокировкой горячих клавиш."""
     QUESTIONS = [
         ("Что показывает термометр?", ["Температуру", "Скорость", "Давление"], 0),
         ("Сколько будет 7 × 8?", ["54", "56", "64"], 1),
@@ -47,6 +47,7 @@ class DemoTestDialog(QDialog):
     def __init__(self, proctor: "ProctorWindow") -> None:
         super().__init__(proctor)
         self.proctor = proctor
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.question_index = 0
         self.answers: list[int | None] = [None] * len(self.QUESTIONS)
         self.focus_lost_at: float | None = None
@@ -230,6 +231,7 @@ class ProctorWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Qostanai Proctor — локальный прототип")
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.resize(1120, 720)
         self.capture: cv2.VideoCapture | None = None
         self.detector = None
@@ -520,7 +522,6 @@ class ProctorWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.critical(self, "Папка данных недоступна", str(exc))
             return
-        # Load optional detectors only when the session starts, so startup remains quick.
         try:
             import mediapipe as mp
             self.face_mesh = mp.solutions.face_mesh.FaceMesh(
@@ -532,7 +533,6 @@ class ProctorWindow(QMainWindow):
             return
         try:
             from ultralytics import YOLO
-            # An explicit local model is preferred; otherwise Ultralytics fetches yolov8n.pt.
             self.detector = YOLO(str(MODEL_PATH) if MODEL_PATH.exists() else "yolov8n.pt")
         except Exception as exc:
             self.face_mesh.close()
@@ -575,20 +575,15 @@ class ProctorWindow(QMainWindow):
 
     @staticmethod
     def open_camera(index: int) -> cv2.VideoCapture:
-        """Try Windows Media Foundation first; DirectShow can return corrupted
-        frames from some virtual-camera drivers (including USB phone cameras).
-        """
+        """Открыть камеру через подходящий драйвер Windows."""
         for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_ANY):
             cap = cv2.VideoCapture(index, backend)
             if not cap.isOpened():
                 cap.release()
                 continue
-            # Prefer a common webcam mode and allow the driver to negotiate it.
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            # MJPG avoids incorrect YUY2 decoding on a number of virtual-camera
-            # paths. Unsupported drivers simply ignore this hint.
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             ok, sample = cap.read()
             if ok and sample is not None and sample.size:
@@ -603,8 +598,6 @@ class ProctorWindow(QMainWindow):
         if not ok:
             self.log_event("Не удалось получить кадр с камеры", "camera")
             return
-        # Some virtual-camera drivers return a uniform green frame when the
-        # phone stream is not connected or the selected device is incorrect.
         if frame is None or frame.size == 0 or float(np.std(frame)) < 4.0:
             self.log_event("Пустой или однотонный кадр — проверьте выбранную камеру и подключение DroidCam", "blank_frame", 5)
             self.video.setText("Нет видеосигнала. Проверьте DroidCam и выберите его камеру в источниках видео.")
@@ -663,7 +656,6 @@ class ProctorWindow(QMainWindow):
 
         if self.detector:
             try:
-                # Lower confidence helps retain partially hand-occluded phones.
                 prediction = self.detector.predict(
                     frame, imgsz=640, conf=0.20, classes=[PHONE_CLASS_ID], verbose=False
                 )[0]
@@ -703,13 +695,13 @@ class ProctorWindow(QMainWindow):
         cv2.putText(frame, label, (x, y), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
     def update_phone_tracking(self, cx: float, cy: float, frame: np.ndarray) -> None:
-        """Heuristically flag a phone that rises into the upper part of the frame."""
+        """Отмечает вероятный подъём телефона."""
         now = time.monotonic()
         if self.phone_track and now - self.phone_track[-1][0] > 2.5:
             self.phone_track.clear()
         self.phone_track.append((now, cx, cy))
 
-        # Compare with a detection at least 0.7s old to ignore single-frame jitter.
+        # Берём точки с интервалом, чтобы не реагировать на дрожание кадра.
         reference = next((item for item in self.phone_track if now - item[0] >= 0.7), None)
         if reference is None:
             return
@@ -725,7 +717,7 @@ class ProctorWindow(QMainWindow):
 
     @staticmethod
     def is_plausible_face(landmarks) -> bool:
-        """Reject grossly implausible Face Mesh shapes before counting a face."""
+        """Отсекает явно ошибочные контуры лица."""
         xs = np.asarray([point.x for point in landmarks], dtype=float)
         ys = np.asarray([point.y for point in landmarks], dtype=float)
         face_width = float(xs.max() - xs.min())
@@ -754,7 +746,7 @@ class ProctorWindow(QMainWindow):
 
     @staticmethod
     def measure_face(landmarks) -> tuple[float, float, float, float]:
-        """Return normalized iris and head offsets; all values are relative to eye size."""
+        """Считает положение глаз и головы относительно лица."""
         eye_pairs = ((33, 133, 468, 159, 145), (362, 263, 473, 386, 374))
         horizontal_iris = []
         vertical_iris = []
@@ -768,7 +760,6 @@ class ProctorWindow(QMainWindow):
         if not horizontal_iris:
             return (0.5, 0.0, 0.5, 0.0)
 
-        # Nose position relative to the eye line estimates head turn and tilt.
         face_left, face_right = landmarks[33], landmarks[263]
         eye_width = max(abs(face_right.x - face_left.x), 1e-5)
         nose = landmarks[1]
@@ -783,7 +774,7 @@ class ProctorWindow(QMainWindow):
         )
 
     def update_gaze_state(self, metrics: tuple[float, float, float, float]) -> str:
-        """Calibrate to the student's neutral pose, smooth noise, then use two severity bands."""
+        """Сглаживает взгляд и сравнивает его с калибровкой."""
         if self.gaze_baseline is None:
             self.gaze_samples.append(metrics)
             if len(self.gaze_samples) < 24:
@@ -802,8 +793,6 @@ class ProctorWindow(QMainWindow):
         delta = smoothed - np.asarray(self.gaze_baseline)
         eye_x, eye_y, head_x, head_y = map(float, delta)
 
-        # Eye movement and head movement have separate thresholds. Small natural
-        # movements are shown as slight; only persistent larger deviations alert.
         candidates = [
             (abs(eye_x) / 0.40, "влево" if eye_x > 0 else "вправо", abs(eye_x), 0.15, 0.40),
             (abs(eye_y) / 0.33, "вниз" if eye_y > 0 else "вверх", abs(eye_y), 0.13, 0.33),
@@ -825,8 +814,6 @@ class ProctorWindow(QMainWindow):
         dwell = 0.65 if proposed.startswith("сильный") else 0.9
         if proposed != self.gaze_state and now - self.gaze_candidate_since >= dwell:
             self.gaze_state = proposed
-            # Count the short confirmation period too, so the alert fires after
-            # 2.5 seconds of continuous deviation rather than 2.5 more seconds.
             self.gaze_state_since = self.gaze_candidate_since
             self.gaze_long_reported = False
             if proposed != "на экран":
