@@ -13,7 +13,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEvent, QSize, QUrl, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QSize, QUrl, Qt, QTimer, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QComboBox, QDialog, QHBoxLayout, QLabel, QListView, QListWidget, QListWidgetItem,
@@ -32,8 +32,12 @@ PHONE_CLASS_ID = 67  # COCO class: cell phone
 LONG_GAZE_SECONDS = 2.5
 
 
+class ShortcutSignals(QObject):
+    blocked = Signal(str)
+
+
 class DemoTestDialog(QDialog):
-    """Full-screen sample quiz with app-level shortcut handling."""
+    """Full-screen sample quiz with temporary system-wide shortcut blocking."""
     QUESTIONS = [
         ("Что показывает термометр?", ["Температуру", "Скорость", "Давление"], 0),
         ("Сколько будет 7 × 8?", ["54", "56", "64"], 1),
@@ -46,6 +50,9 @@ class DemoTestDialog(QDialog):
         self.question_index = 0
         self.answers: list[int | None] = [None] * len(self.QUESTIONS)
         self.focus_lost_at: float | None = None
+        self.keyboard_hooks: list[tuple[str, object]] = []
+        self.shortcut_signals = ShortcutSignals(self)
+        self.shortcut_signals.blocked.connect(self.on_blocked_shortcut)
         self.setWindowTitle("Пробный тест")
         self.setStyleSheet("QDialog { background:#f8fafc; } QLabel { color:#0f172a; }")
 
@@ -65,8 +72,8 @@ class DemoTestDialog(QDialog):
             self.choices.addButton(button, i)
             layout.addWidget(button)
         self.notice = QLabel(
-            "Демо-киоск: Ctrl+C/V и Esc отключены внутри теста; уход в другое окно записывается. "
-            "Системные Alt+Tab и Windows остаются доступны."
+            "Защита активна: Alt+Tab, Win, Ctrl+C/V, Ctrl+Tab и PrtScn блокируются "
+            "пока открыт тест. Выход в другое окно обходным способом фиксируется."
         )
         self.notice.setStyleSheet("font-size:14px;color:#64748b")
         layout.insertWidget(0, self.header)
@@ -83,6 +90,68 @@ class DemoTestDialog(QDialog):
         buttons.addWidget(self.finish_button)
         layout.addLayout(buttons)
         self.render_question()
+
+    def install_keyboard_protection(self) -> None:
+        try:
+            import keyboard
+        except ImportError as exc:
+            raise RuntimeError("Не установлена библиотека keyboard. Установите зависимости проекта.") from exc
+
+        hotkeys = (
+            ("alt+tab", "Alt+Tab"),
+            ("alt+shift+tab", "Alt+Shift+Tab"),
+            ("alt+esc", "Alt+Esc"),
+            ("alt+f4", "Alt+F4"),
+            ("ctrl+alt+tab", "Ctrl+Alt+Tab"),
+            ("ctrl+esc", "Ctrl+Esc"),
+            ("ctrl+shift+esc", "Ctrl+Shift+Esc"),
+            ("ctrl+tab", "Ctrl+Tab"),
+            ("ctrl+shift+tab", "Ctrl+Shift+Tab"),
+            ("ctrl+c", "Ctrl+C"),
+            ("ctrl+v", "Ctrl+V"),
+            ("ctrl+insert", "Ctrl+Insert"),
+            ("shift+insert", "Shift+Insert"),
+            ("print screen", "PrtScn"),
+        )
+        try:
+            for combo, label in hotkeys:
+                handle = keyboard.add_hotkey(
+                    combo,
+                    self.shortcut_signals.blocked.emit,
+                    args=(label,),
+                    suppress=True,
+                )
+                self.keyboard_hooks.append(("hotkey", handle))
+            for key, label in (("left windows", "клавиша Windows"), ("right windows", "клавиша Windows")):
+                callback = lambda _event, text=label: self.shortcut_signals.blocked.emit(text)
+                handle = keyboard.on_press_key(key, callback, suppress=True)
+                self.keyboard_hooks.append(("hook", handle))
+        except Exception:
+            self.remove_keyboard_protection()
+            raise
+
+    def remove_keyboard_protection(self) -> None:
+        try:
+            import keyboard
+        except ImportError:
+            self.keyboard_hooks.clear()
+            return
+        for hook_type, handle in reversed(self.keyboard_hooks):
+            try:
+                if hook_type == "hotkey":
+                    keyboard.remove_hotkey(handle)
+                else:
+                    keyboard.unhook(handle)
+            except (KeyError, ValueError):
+                pass
+        self.keyboard_hooks.clear()
+
+    def on_blocked_shortcut(self, label: str) -> None:
+        self.proctor.log_event(
+            f"Заблокирована комбинация клавиш: {label}",
+            f"blocked_shortcut_{label}",
+            0.75,
+        )
 
     def render_question(self) -> None:
         if self.question_index >= len(self.QUESTIONS):
@@ -250,10 +319,25 @@ class ProctorWindow(QMainWindow):
     def open_demo_test(self) -> None:
         if not self.started:
             return
-        self.log_event("Пробный тест открыт", "test_start", 0)
         dialog = DemoTestDialog(self)
-        dialog.showFullScreen()
-        dialog.exec()
+        try:
+            dialog.install_keyboard_protection()
+        except Exception as exc:
+            self.log_event(f"Не удалось включить блокировку клавиш: {exc}", "keyboard_protection_error", 0)
+            QMessageBox.critical(
+                self,
+                "Защита клавиш недоступна",
+                "Не удалось включить системную блокировку клавиш. Пробный тест не запущен, "
+                "чтобы не показывать режим защиты как работающий.\n\n"
+                f"Подробности: {exc}",
+            )
+            return
+        self.log_event("Пробный тест открыт, блокировка горячих клавиш включена", "test_start", 0)
+        try:
+            dialog.showFullScreen()
+            dialog.exec()
+        finally:
+            dialog.remove_keyboard_protection()
 
     def scan_cameras(self) -> None:
         self.scan_button.setEnabled(False)

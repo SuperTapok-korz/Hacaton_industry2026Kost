@@ -37,6 +37,7 @@ try {
         "--collect-all", "torch",
         "--collect-all", "torchvision",
         "--hidden-import", "mediapipe.python._framework_bindings",
+        "--hidden-import", "keyboard",
         "main.py"
     )
     Write-Host "Собираю приложение. Это может занять несколько минут и создать большой архив..."
