@@ -29,6 +29,10 @@ DATA_DIR = (
 )
 MODEL_PATH = APP_DIR / "yolov8n.pt"
 PHONE_CLASS_ID = 67  # COCO class: cell phone
+PHONE_CONFIDENCE = 0.15
+PHONE_IMAGE_SIZE = 960
+PHONE_SCAN_INTERVAL = 0.4
+PHONE_BOX_TTL = 1.2
 LONG_GAZE_SECONDS = 2.5
 
 
@@ -249,6 +253,10 @@ class ProctorWindow(QMainWindow):
         self.gaze_long_reported = False
         self.multiple_faces_since: float | None = None
         self.phone_track: deque[tuple[float, float, float]] = deque(maxlen=40)
+        self.phone_hit_streak = 0
+        self.phone_scan_at = 0.0
+        self.phone_seen_at = 0.0
+        self.phone_boxes: list[tuple[float, float, float, float, float]] = []
         self.started = False
 
         self.video = QLabel("Нажмите «Начать проверку», чтобы включить камеру")
@@ -525,7 +533,7 @@ class ProctorWindow(QMainWindow):
         try:
             import mediapipe as mp
             self.face_mesh = mp.solutions.face_mesh.FaceMesh(
-                max_num_faces=3, refine_landmarks=True, min_detection_confidence=0.5,
+                max_num_faces=3, refine_landmarks=True, min_detection_confidence=0.45,
                 min_tracking_confidence=0.5,
             )
         except Exception as exc:
@@ -570,6 +578,10 @@ class ProctorWindow(QMainWindow):
         self.gaze_state = ""
         self.gaze_state_since = 0.0
         self.gaze_long_reported = False
+        self.phone_hit_streak = 0
+        self.phone_scan_at = 0.0
+        self.phone_seen_at = 0.0
+        self.phone_boxes.clear()
         self.log_event("Сессия начата", "start", 0)
         self.timer.start(80)
 
@@ -654,27 +666,44 @@ class ProctorWindow(QMainWindow):
         else:
             self.log_event("Анализ лица не запущен", "face_error")
 
-        if self.detector:
+        now = time.monotonic()
+        phone_to_track = None
+        if self.detector and now - self.phone_scan_at >= PHONE_SCAN_INTERVAL:
             try:
                 prediction = self.detector.predict(
-                    frame, imgsz=640, conf=0.20, classes=[PHONE_CLASS_ID], verbose=False
+                    frame, imgsz=PHONE_IMAGE_SIZE, conf=PHONE_CONFIDENCE,
+                    classes=[PHONE_CLASS_ID], max_det=10, verbose=False,
                 )[0]
-                phone_boxes = [box for box in prediction.boxes if int(box.cls[0]) == PHONE_CLASS_ID]
-                for box in phone_boxes:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-                    conf = float(box.conf[0])
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (239, 68, 68), 2)
-                    cv2.putText(frame, f"Телефон {conf:.0%}", (x1, max(24, y1 - 8)),
-                                cv2.FONT_HERSHEY_SIMPLEX, .65, (239, 68, 68), 2)
-                if phone_boxes:
-                    best_phone = max(phone_boxes, key=lambda item: float(item.conf[0]))
-                    x1, y1, x2, y2 = map(float, best_phone.xyxy[0].tolist())
-                    self.update_phone_tracking((x1 + x2) / 2 / width, (y1 + y2) / 2 / height, frame)
-                    self.log_event("Обнаружен возможный смартфон", "phone", 4, evidence_frame=frame)
+                self.phone_scan_at = time.monotonic()
+                detections = [
+                    (*map(float, box.xyxy[0].tolist()), float(box.conf[0]))
+                    for box in prediction.boxes
+                    if int(box.cls[0]) == PHONE_CLASS_ID
+                ]
+                self.phone_hit_streak = self.phone_hit_streak + 1 if detections else 0
+                if detections:
+                    self.phone_boxes = detections
+                    self.phone_seen_at = self.phone_scan_at
+                elif now - self.phone_seen_at > PHONE_BOX_TTL:
+                    self.phone_boxes.clear()
+                if detections and self.phone_hit_streak >= 2:
+                    phone_to_track = max(detections, key=lambda item: item[4])
                 elif self.phone_track and time.monotonic() - self.phone_track[-1][0] > 2.5:
                     self.phone_track.clear()
             except Exception as exc:
+                self.phone_scan_at = time.monotonic()
                 self.log_event(f"Ошибка детектора: {exc}", "detector_error", 10)
+        if now - self.phone_seen_at > PHONE_BOX_TTL:
+            self.phone_boxes.clear()
+        for x1, y1, x2, y2, confidence in self.phone_boxes:
+            x1, y1, x2, y2 = map(int, (x1, y1, x2, y2))
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (239, 68, 68), 2)
+            cv2.putText(frame, f"Телефон {confidence:.0%}", (x1, max(24, y1 - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, .65, (239, 68, 68), 2)
+        if phone_to_track:
+            x1, y1, x2, y2, _ = phone_to_track
+            self.update_phone_tracking((x1 + x2) / 2 / width, (y1 + y2) / 2 / height, frame)
+            self.log_event("Обнаружен возможный смартфон", "phone", 4, evidence_frame=frame)
 
         self.draw_watermark(frame)
         image = QImage(frame.data, width, height, frame.strides[0], QImage.Format.Format_BGR888)
@@ -725,17 +754,17 @@ class ProctorWindow(QMainWindow):
         if face_width < 1e-4 or face_height < 1e-4:
             return False
         aspect = face_width / face_height
-        if not 0.45 <= aspect <= 1.35:
+        if face_width < 0.02 or face_height < 0.025 or not 0.45 <= aspect <= 1.35:
             return False
 
         eye_left, eye_right = landmarks[33], landmarks[263]
         nose, mouth_left, mouth_right = landmarks[1], landmarks[61], landmarks[291]
         eye_span = abs(eye_right.x - eye_left.x)
-        if eye_span / face_width < 0.25:
+        if eye_span / face_width < 0.23:
             return False
         eye_min_x = min(eye_left.x, eye_right.x)
         nose_position = (nose.x - eye_min_x) / max(eye_span, 1e-5)
-        if not 0.12 <= nose_position <= 0.88:
+        if not 0.08 <= nose_position <= 0.92:
             return False
 
         eye_line = (eye_left.y + eye_right.y) / 2
@@ -754,7 +783,8 @@ class ProctorWindow(QMainWindow):
             span = landmarks[inner].x - landmarks[outer].x
             if abs(span) < 1e-5:
                 continue
-            horizontal_iris.append((landmarks[iris].x - landmarks[outer].x) / span)
+            eye_center_x = (landmarks[outer].x + landmarks[inner].x) / 2
+            horizontal_iris.append((landmarks[iris].x - eye_center_x) / abs(span))
             eye_mid_y = (landmarks[upper].y + landmarks[lower].y) / 2
             vertical_iris.append((landmarks[iris].y - eye_mid_y) / abs(span))
         if not horizontal_iris:
@@ -763,7 +793,8 @@ class ProctorWindow(QMainWindow):
         face_left, face_right = landmarks[33], landmarks[263]
         eye_width = max(abs(face_right.x - face_left.x), 1e-5)
         nose = landmarks[1]
-        head_horizontal = (nose.x - face_left.x) / (face_right.x - face_left.x or 1e-5)
+        eye_center_x = (face_left.x + face_right.x) / 2
+        head_horizontal = (nose.x - eye_center_x) / eye_width
         eye_line_y = (face_left.y + face_right.y) / 2
         head_vertical = (nose.y - eye_line_y) / eye_width
         return (
@@ -794,9 +825,9 @@ class ProctorWindow(QMainWindow):
         eye_x, eye_y, head_x, head_y = map(float, delta)
 
         candidates = [
-            (abs(eye_x) / 0.40, "влево" if eye_x > 0 else "вправо", abs(eye_x), 0.15, 0.40),
+            (abs(eye_x) / 0.40, "вправо" if eye_x > 0 else "влево", abs(eye_x), 0.15, 0.40),
             (abs(eye_y) / 0.33, "вниз" if eye_y > 0 else "вверх", abs(eye_y), 0.13, 0.33),
-            (abs(head_x) / 0.28, "поворот головы влево" if head_x > 0 else "поворот головы вправо", abs(head_x), 0.10, 0.28),
+            (abs(head_x) / 0.28, "поворот головы вправо" if head_x > 0 else "поворот головы влево", abs(head_x), 0.10, 0.28),
             (abs(head_y) / 0.40, "наклон головы вниз" if head_y > 0 else "наклон головы вверх", abs(head_y), 0.16, 0.40),
         ]
         strongest = max(candidates, key=lambda item: item[0])
@@ -861,6 +892,9 @@ class ProctorWindow(QMainWindow):
         self.gaze_state_since = 0.0
         self.gaze_long_reported = False
         self.phone_track.clear()
+        self.phone_hit_streak = 0
+        self.phone_seen_at = 0.0
+        self.phone_boxes.clear()
         self.detector = None
         self.started = False
         self.start_button.setEnabled(True)
