@@ -29,6 +29,7 @@ DATA_DIR = (
 )
 MODEL_PATH = APP_DIR / "yolov8n.pt"
 PHONE_CLASS_ID = 67  # COCO class: cell phone
+LONG_GAZE_SECONDS = 2.5
 
 
 class DemoTestDialog(QDialog):
@@ -173,6 +174,8 @@ class ProctorWindow(QMainWindow):
         self.gaze_candidate = ""
         self.gaze_candidate_since = 0.0
         self.gaze_state = ""
+        self.gaze_state_since = 0.0
+        self.gaze_long_reported = False
         self.multiple_faces_since: float | None = None
         self.phone_track: deque[tuple[float, float, float]] = deque(maxlen=40)
         self.started = False
@@ -481,6 +484,8 @@ class ProctorWindow(QMainWindow):
         self.gaze_metrics_history.clear()
         self.gaze_candidate = ""
         self.gaze_state = ""
+        self.gaze_state_since = 0.0
+        self.gaze_long_reported = False
         self.log_event("Сессия начата", "start", 0)
         self.timer.start(80)
 
@@ -704,6 +709,8 @@ class ProctorWindow(QMainWindow):
             self.gaze_candidate = "на экран"
             self.gaze_candidate_since = time.monotonic()
             self.gaze_state = "на экран"
+            self.gaze_state_since = self.gaze_candidate_since
+            self.gaze_long_reported = False
             return "Калибровка готова — смотрите на экран"
 
         self.gaze_metrics_history.append(metrics)
@@ -734,6 +741,10 @@ class ProctorWindow(QMainWindow):
         dwell = 0.65 if proposed.startswith("сильный") else 0.9
         if proposed != self.gaze_state and now - self.gaze_candidate_since >= dwell:
             self.gaze_state = proposed
+            # Count the short confirmation period too, so the alert fires after
+            # 2.5 seconds of continuous deviation rather than 2.5 more seconds.
+            self.gaze_state_since = self.gaze_candidate_since
+            self.gaze_long_reported = False
             if proposed != "на экран":
                 key = "gaze_strong" if proposed.startswith("сильный") else "gaze_slight"
                 self.log_event(
@@ -742,7 +753,25 @@ class ProctorWindow(QMainWindow):
                     key,
                     1.0,
                 )
-        return self.gaze_state or proposed
+        if (
+            self.gaze_state != "на экран"
+            and self.gaze_state
+            and not self.gaze_long_reported
+            and now - self.gaze_state_since >= LONG_GAZE_SECONDS
+        ):
+            direction = self.gaze_state.partition(": ")[2]
+            duration = now - self.gaze_state_since
+            self.log_event(
+                f"Длительный отвод взгляда ({duration:.1f} с): {direction}",
+                "gaze_long",
+                1.0,
+            )
+            self.gaze_long_reported = True
+
+        state = self.gaze_state or proposed
+        if state != "на экран" and self.gaze_state_since:
+            state += f" • {now - self.gaze_state_since:.1f} с"
+        return state
 
     def stop_session(self) -> None:
         was_started = self.started
@@ -758,6 +787,8 @@ class ProctorWindow(QMainWindow):
         self.gaze_metrics_history.clear()
         self.gaze_candidate = ""
         self.gaze_state = ""
+        self.gaze_state_since = 0.0
+        self.gaze_long_reported = False
         self.phone_track.clear()
         self.detector = None
         self.started = False
