@@ -3,5 +3,6 @@ venv/
 reports/
 build/
 dist/
+installer/*.sed
 __pycache__/
 QostanaiProctor.spec
