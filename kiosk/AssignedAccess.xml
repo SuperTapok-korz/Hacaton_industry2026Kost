@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AssignedAccessConfiguration
+    xmlns="http://schemas.microsoft.com/AssignedAccess/2017/config"
+    xmlns:v4="http://schemas.microsoft.com/AssignedAccess/2021/config">
+  <Profiles>
+    <Profile Id="{72A6D005-09B8-49EE-8C3D-20F79C438D9E}" Name="Qostanai Proctor">
+      <KioskModeApp
+          v4:ClassicAppPath="C:\QostanaiProctor\QostanaiProctor.exe"
+          v4:ClassicAppArguments="--kiosk" />
+    </Profile>
+  </Profiles>
+  <Configs>
+    <Config>
+      <Account>.\ProctorKiosk</Account>
+      <DefaultProfile Id="{72A6D005-09B8-49EE-8C3D-20F79C438D9E}" />
+    </Config>
+  </Configs>
+</AssignedAccessConfiguration>
